@@ -1,15 +1,15 @@
 """This package provides an AsyncDb class, which is a thin async wrapper around the
 pg-iam database system. The class provides async methods for calling database functions.
 
-This is the async version of the Db class from pgiam.py, using psycopg3's native async support."""
+This is the async version of the Db class from pgiam.py, using SQLAlchemy's async support."""
 
 import json
 
 from contextlib import asynccontextmanager
 from typing import Union, Optional, AsyncContextManager
 
-import psycopg
-from psycopg_pool import AsyncConnectionPool
+import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from ._constants import (
     # Validation constants
@@ -65,27 +65,34 @@ from ._util import (
 )
 
 
-def async_iam_engine(dsn: str, require_ssl: bool = False) -> AsyncConnectionPool:
-    connect_kwargs = {} if not require_ssl else {"sslmode": "require"}
-    pool = AsyncConnectionPool(dsn, kwargs=connect_kwargs, min_size=1, max_size=10)
-    return pool
+def async_iam_engine(dsn: str, require_ssl: bool = False) -> sqlalchemy.ext.asyncio.AsyncEngine:
+    # Convert postgresql:// to postgresql+asyncpg:// for async support
+    if dsn.startswith("postgresql://"):
+        dsn = dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+    connect_args = {} if not require_ssl else {"ssl": "require"}
+    engine = create_async_engine(dsn, connect_args=connect_args, pool_size=10, max_overflow=0)
+    return engine
 
 
 @asynccontextmanager
 async def async_session_scope(
-    pool: AsyncConnectionPool,
+    engine: sqlalchemy.ext.asyncio.AsyncEngine,
     session_identity: Optional[str] = None,
-) -> AsyncContextManager[psycopg.AsyncConnection]:
-    async with pool.connection() as conn:
-        try:
-            if session_identity:
-                q = "set session \"session.identity\" = '{0}'".format(session_identity)
-                await conn.execute(q)
-            yield conn
-            await conn.commit()
-        except Exception as e:
-            await conn.rollback()
-            raise e
+    session: Optional[AsyncSession] = None,
+) -> AsyncContextManager[AsyncSession]:
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    session = SessionLocal()
+    try:
+        if session_identity:
+            q = "set session \"session.identity\" = '{0}'".format(session_identity)
+            await session.execute(sqlalchemy.text(q))
+        yield session
+        await session.commit()
+    except Exception as e:
+        await session.rollback()
+        raise e
+    finally:
+        await session.close()
 
 
 class AsyncDb(object):
@@ -138,8 +145,8 @@ class AsyncDb(object):
     from iam.async_pgiam import AsyncDb, async_session_scope, async_iam_engine
 
     dsn = f'' # some credentials
-    pool = async_iam_engine(dsn)
-    db = AsyncDb(pool)
+    engine = async_iam_engine(dsn)
+    db = AsyncDb(engine)
 
     # use raw sql and helper functions
     query = 'select person_id from persons where name=:name'
@@ -152,21 +159,21 @@ class AsyncDb(object):
     vals = {'g': 'g1', 'm': 'g2'}
     await db.exec_sql('insert into group_moderators values (:g, :m)', vals, fetch=False)
 
-    # use connection for multiple operations
+    # use session for multiple operations
     identity = 'random_person'
-    async with async_session_scope(pool, identity) as conn:
-        result = await db.exec_sql('select * from persons', conn=conn)
+    async with async_session_scope(engine, identity) as session:
+        result = await db.exec_sql('select * from persons', session=session)
 
     # Clean up
-    await pool.close()
+    await engine.dispose()
 
     """
 
-    def __init__(self, pool: AsyncConnectionPool, config: dict = {}) -> None:
+    def __init__(self, engine: sqlalchemy.ext.asyncio.AsyncEngine, config: dict = {}) -> None:
         super(AsyncDb, self).__init__()
-        if not pool:
-            pool = async_iam_engine(dsn_from_config(config))
-        self.pool = pool
+        if not engine:
+            engine = async_iam_engine(dsn_from_config(config))
+        self.engine = engine
 
     async def exec_sql(
         self,
@@ -174,7 +181,7 @@ class AsyncDb(object):
         params: dict = {},
         fetch: bool = True,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
         as_dicts: bool = False,
     ) -> Union[bool, list]:
         """
@@ -187,7 +194,7 @@ class AsyncDb(object):
         params: dict
         fetch: bool, set to False for insert, update and delete
         session_identity: the identity to record in audit
-        conn: psycopg async connection object
+        session: SQLAlchemy async session object
         as_dicts: format data as dictionaries instead of tuples
 
         Examples
@@ -202,27 +209,17 @@ class AsyncDb(object):
 
         """
         res, out = True, None
-        if conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, params)
-                columns = (
-                    [desc[0] for desc in cur.description]
-                    if fetch and cur.description
-                    else None
-                )
-                if fetch:
-                    res = await cur.fetchall()
+        if session:
+            result = await session.execute(sqlalchemy.text(sql), params)
+            columns = list(result.keys()) if fetch and hasattr(result, 'keys') else None
+            if fetch:
+                res = result.fetchall()
         else:
-            async with async_session_scope(self.pool, session_identity) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(sql, params)
-                    columns = (
-                        [desc[0] for desc in cur.description]
-                        if fetch and cur.description
-                        else None
-                    )
-                    if fetch:
-                        res = await cur.fetchall()
+            async with async_session_scope(self.engine, session_identity) as session:
+                result = await session.execute(sqlalchemy.text(sql), params)
+                columns = list(result.keys()) if fetch and hasattr(result, 'keys') else None
+                if fetch:
+                    res = result.fetchall()
 
         if fetch:
             out = res
@@ -239,7 +236,7 @@ class AsyncDb(object):
         self,
         person_id: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the group memberships associated with a person's
@@ -258,7 +255,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PERSON_GROUPS.format(person_id),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -267,7 +264,7 @@ class AsyncDb(object):
         person_id: str,
         grants=True,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get an overview of the capabilities a person has access to
@@ -288,7 +285,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PERSON_CAPABILITIES.format(person_id, g),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -296,7 +293,7 @@ class AsyncDb(object):
         self,
         person_id: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get an overview of all access rights the person has,
@@ -316,7 +313,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PERSON_ACCESS.format(person_id),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -324,7 +321,7 @@ class AsyncDb(object):
         self,
         user_name,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the group memberships for a user.
@@ -342,7 +339,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_USER_GROUPS.format(user_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -350,7 +347,7 @@ class AsyncDb(object):
         self,
         user_name,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the groups which the user moderates.
@@ -368,7 +365,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_USER_MODERATORS.format(user_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -377,7 +374,7 @@ class AsyncDb(object):
         user_name,
         grants: bool = True,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the capabilities (access) for a user via its group
@@ -398,7 +395,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_USER_CAPABILITIES.format(user_name, g),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -408,7 +405,7 @@ class AsyncDb(object):
         filter_memberships: Optional[bool] = False,
         client_timestamp: Optional[str] = None,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the membership graph of group_name.
@@ -431,7 +428,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_GROUP_MEMBERS.format(args),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -439,7 +436,7 @@ class AsyncDb(object):
         self,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the moderators for a group.
@@ -457,7 +454,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_GROUP_MODERATORS.format(group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -469,7 +466,7 @@ class AsyncDb(object):
         end_date: Optional[str] = None,
         weekdays: Optional[dict] = None,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Add a new member to a group. A new member can be identified
@@ -513,7 +510,7 @@ class AsyncDb(object):
                     weekdays,
                 ),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -522,7 +519,7 @@ class AsyncDb(object):
         group_name: str,
         member: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Remove a member from a group. A member can be identified
@@ -546,7 +543,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_GROUP_MEMBER_REMOVE.format(group_name, member),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -555,7 +552,7 @@ class AsyncDb(object):
         group_name,
         grants=True,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the capabilities that the group enables access to.
@@ -575,7 +572,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_GROUP_CAPABILITIES.format(group_name, g),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -584,7 +581,7 @@ class AsyncDb(object):
         institution: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Affiliate a group to an institution. An institution can be
@@ -608,7 +605,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_GROUP_ADD.format(institution, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -617,7 +614,7 @@ class AsyncDb(object):
         institution: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Remove affilitation between a group and an institution. A group
@@ -642,7 +639,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_GROUP_REMOVE.format(institution, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -650,7 +647,7 @@ class AsyncDb(object):
         self,
         institution: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the affiliation graph of institution.
@@ -668,7 +665,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_GROUPS.format(institution),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -677,7 +674,7 @@ class AsyncDb(object):
         institution: str,
         member: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Add a new member to an institution. A new member can be
@@ -712,7 +709,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_MEMBER_ADD.format(institution, member),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -721,7 +718,7 @@ class AsyncDb(object):
         institution: str,
         member: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Remove a member from an institution. A member can be identified
@@ -746,7 +743,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_MEMBER_REMOVE.format(institution, member),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -754,7 +751,7 @@ class AsyncDb(object):
         self,
         institution: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the membership graph of institution.
@@ -772,7 +769,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_INSTITUTION_MEMBERS.format(institution),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -781,7 +778,7 @@ class AsyncDb(object):
         project: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Affiliate a group to project. A project can be identified
@@ -808,7 +805,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PROJECT_GROUP_ADD.format(project, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -817,7 +814,7 @@ class AsyncDb(object):
         project: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Remove affilitation between a group and a project. A group
@@ -842,7 +839,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PROJECT_GROUP_REMOVE.format(project, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -850,7 +847,7 @@ class AsyncDb(object):
         self,
         project: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the affiliation graph of project.
@@ -868,7 +865,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PROJECT_GROUPS.format(project),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -876,7 +873,7 @@ class AsyncDb(object):
         self,
         project: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the institution graph of project.
@@ -894,7 +891,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_PROJECT_INSTITUTIONS.format(project),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -903,7 +900,7 @@ class AsyncDb(object):
         grant_id: str,
         new_grant_rank: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Set the rank of a grant.
@@ -922,7 +919,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_CAPABILITY_GRANT_RANK_SET.format(grant_id, new_grant_rank),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -930,7 +927,7 @@ class AsyncDb(object):
         self,
         grant_id: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Get the resource grants associated with a specific capability.
@@ -948,7 +945,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_CAPABILITY_GRANT_DELETE.format(grant_id),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -956,7 +953,7 @@ class AsyncDb(object):
         self,
         namespace: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> None:
         """
         Delete all grants for the given namespace. The namespace
@@ -974,7 +971,7 @@ class AsyncDb(object):
         return await self.exec_sql(
             QUERY_CAPABILITY_GRANTS_DELETE.format(namespace),
             session_identity=session_identity,
-            conn=conn,
+            session=session,
             fetch=False,
         )
 
@@ -982,7 +979,7 @@ class AsyncDb(object):
         self,
         instance_id: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Create a capability instance.
@@ -1000,7 +997,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_CAPABILITY_INSTANCE_GET.format(instance_id),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -1087,8 +1084,8 @@ class AsyncDb(object):
 
         # find existing capabilities
         existing_names = []
-        async with async_session_scope(self.pool, session_identity) as conn:
-            results = await self.exec_sql(QUERY_CAPABILITIES_HTTP_LIST, conn=conn)
+        async with async_session_scope(self.engine, session_identity) as session:
+            results = await self.exec_sql(QUERY_CAPABILITIES_HTTP_LIST, session=session)
             for result in results:
                 existing_names.append(result[0])
 
@@ -1097,7 +1094,7 @@ class AsyncDb(object):
         updates = set(incoming_names).intersection(existing_names)
         deletes = set(existing_names).difference(incoming_names)
 
-        async with async_session_scope(self.pool, session_identity) as conn:
+        async with async_session_scope(self.engine, session_identity) as session:
             for capability in capabilities:
                 input_keys = capability.keys()
                 for column in CAPABILITIES_TABLE_COLUMNS:
@@ -1110,21 +1107,21 @@ class AsyncDb(object):
                         CAPABILITIES_HTTP_UPDATE_QUERY,
                         capability,
                         fetch=False,
-                        conn=conn,
+                        session=session,
                     )
                 elif capability.get("capability_name") in inserts:
                     await self.exec_sql(
                         CAPABILITIES_HTTP_INSERT_QUERY,
                         capability,
                         fetch=False,
-                        conn=conn,
+                        session=session,
                     )
             if deletes:
                 await self.exec_sql(
                     CAPABILITIES_HTTP_DELETE_QUERY,
                     {"deletes": list(deletes)},
                     fetch=False,
-                    conn=conn,
+                    session=session,
                 )
 
         return {
@@ -1206,9 +1203,9 @@ class AsyncDb(object):
             grant_sets[namespace][method].append(name)
 
         new_grants = []
-        async with async_session_scope(self.pool, session_identity) as conn:
+        async with async_session_scope(self.engine, session_identity) as session:
             for grant in grants:
-                exists = (await self.exec_sql(GRANTS_EXISTS_QUERY, grant, conn=conn))[
+                exists = (await self.exec_sql(GRANTS_EXISTS_QUERY, grant, session=session))[
                     0
                 ][0]
                 input_keys = grant.keys()
@@ -1227,31 +1224,31 @@ class AsyncDb(object):
                     grant["capability_grant_static"] = True
                 if exists:
                     await self.exec_sql(
-                        GRANTS_UPDATE_QUERY, grant, fetch=False, conn=conn
+                        GRANTS_UPDATE_QUERY, grant, fetch=False, session=session
                     )
                     curr_grant_id = (
                         await self.exec_sql(
                             GRANTS_GET_ID_FROM_NAME_QUERY,
                             {"name": grant["capability_grant_name"]},
-                            conn=conn,
+                            session=session,
                         )
                     )[0][0]
                     await self.exec_sql(
                         QUERY_CAPABILITY_GRANT_RANK_SET.format(
                             curr_grant_id, grant["capability_grant_rank"]
                         ),
-                        conn=conn,
+                        session=session,
                     )
                     work_done["updates"].append(grant.get("capability_grant_name"))
                 else:
                     await self.exec_sql(
-                        GRANTS_INSERT_QUERY, grant, fetch=False, conn=conn
+                        GRANTS_INSERT_QUERY, grant, fetch=False, session=session
                     )
                     curr_grant_id = (
                         await self.exec_sql(
                             GRANTS_GET_ID_FROM_NAME_QUERY,
                             {"name": grant["capability_grant_name"]},
-                            conn=conn,
+                            session=session,
                         )
                     )[0][0]
                     new_grants.append(
@@ -1260,25 +1257,25 @@ class AsyncDb(object):
                     work_done["inserts"].append(grant.get("capability_grant_name"))
 
         # set the rank values
-        async with async_session_scope(self.pool, session_identity) as conn:
+        async with async_session_scope(self.engine, session_identity) as session:
             for grant in new_grants:
                 await self.exec_sql(
                     QUERY_CAPABILITY_GRANT_RANK_SET.format(grant["id"], grant["rank"]),
-                    conn=conn,
+                    session=session,
                 )
 
         if static_grants:
             for namespace, grant_set in grant_sets.items():
                 for method, incoming_names in with_all_http_methods(grant_set).items():
                     existing_names = []
-                    async with async_session_scope(self.pool, session_identity) as conn:
+                    async with async_session_scope(self.engine, session_identity) as session:
                         results = await self.exec_sql(
                             GRANTS_FIND_EXISTING_QUERY,
                             {
                                 "namespace": namespace,
                                 "method": method,
                             },
-                            conn=conn,
+                            session=session,
                         )
                         for result in results:
                             existing_names.append(result[0])
@@ -1289,7 +1286,7 @@ class AsyncDb(object):
                                     await self.exec_sql(
                                         "select capability_grant_id from capabilities_http_grants where capability_grant_name = :name",
                                         {"name": name},
-                                        conn=conn,
+                                        session=session,
                                     )
                                 )[0][0]
                                 await self.capability_grant_delete(
@@ -1303,7 +1300,7 @@ class AsyncDb(object):
         grant_reference: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Add a required group to a grant.
@@ -1322,7 +1319,7 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_CAPABILITY_GRANT_GROUP_ADD.format(grant_reference, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]
 
@@ -1331,7 +1328,7 @@ class AsyncDb(object):
         grant_reference: str,
         group_name: str,
         session_identity: Optional[str] = None,
-        conn: Optional[psycopg.AsyncConnection] = None,
+        session: Optional[AsyncSession] = None,
     ) -> dict:
         """
         Remove a required group from a grant.
@@ -1350,6 +1347,6 @@ class AsyncDb(object):
             await self.exec_sql(
                 QUERY_CAPABILITY_GRANT_GROUP_REMOVE.format(grant_reference, group_name),
                 session_identity=session_identity,
-                conn=conn,
+                session=session,
             )
         )[0][0]

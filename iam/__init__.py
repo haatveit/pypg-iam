@@ -8,11 +8,11 @@ __all__ = [
     "dsn_from_config",
 ]
 
-# Optional async support (requires psycopg to be installed)
+# Optional async support (requires asyncpg to be installed)
 try:
     from .async_pgiam import AsyncDb, async_iam_engine, async_session_scope
 
     __all__.extend(["AsyncDb", "async_iam_engine", "async_session_scope"])
 except ImportError:
-    # psycopg not installed - async support not available
+    # asyncpg not installed - async support not available
     pass
