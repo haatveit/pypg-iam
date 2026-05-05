@@ -13,7 +13,7 @@ packages = [{include = "iam"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9"
-sqlalchemy = ">=1.4.22,<2"
+sqlalchemy = ">=1.4.22"
 psycopg2 = ">=2.8.3"
 asyncpg = {version = ">=0.27.0", optional = true}
 
