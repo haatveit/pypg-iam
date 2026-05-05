@@ -780,8 +780,10 @@ class Db(object):
         dict
 
         """
-        q = "select project_institutions('{0}')".format(institution)
-        return self.exec_sql(q, session_identity=session_identity, session=session)[0][0]
+        q = "select project_institutions('{0}')".format(project)
+        return self.exec_sql(q, session_identity=session_identity, session=session)[0][
+            0
+        ]
 
     def capability_grant_rank_set(
         self,
