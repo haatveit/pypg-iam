@@ -17,16 +17,18 @@ This installs the synchronous API only, which uses SQLAlchemy and psycopg2.
 
 ### Installation with async support
 
+**Note:** Async support requires SQLAlchemy 2.0 or higher. The synchronous API works with SQLAlchemy 1.4+.
+
 ```bash
 # Default: psycopg3 (official PostgreSQL driver, recommended)
-pip install pypg-iam[async]
+pip install pypg-iam[async] 'sqlalchemy>=2.0.0'
 # or
-poetry add pypg-iam[async]
+poetry add pypg-iam[async] 'sqlalchemy>=2.0.0'
 
 # Alternative: asyncpg (optimized for performance)
-pip install pypg-iam[async-asyncpg]
+pip install pypg-iam[async-asyncpg] 'sqlalchemy>=2.0.0'
 # or
-poetry add pypg-iam[async-asyncpg]
+poetry add pypg-iam[async-asyncpg] 'sqlalchemy>=2.0.0'
 ```
 
 This includes an optional async driver (psycopg3 by default, or asyncpg as an alternative) for async support with SQLAlchemy.
@@ -91,6 +93,8 @@ When using `driver='auto'` (the default), the function will use psycopg3 if avai
 
 # Running tests
 
+## Synchronous tests
+
 ```bash
 poetry install
 
@@ -100,8 +104,30 @@ export PYPGIAM_PW=""
 export PYPGIAM_HOST=""
 export PYPGIAM_DB=""
 
-# and the run tests
+# run sync tests
 poetry run pytest iam/tests.py
+```
+
+## Async tests
+
+Async tests require pytest-asyncio and at least one async driver:
+
+```bash
+# Install test dependencies and async driver(s)
+poetry install
+pip install pytest-asyncio
+
+# Install psycopg3 (default)
+pip install pypg-iam[async]
+
+# Or install asyncpg (alternative)
+pip install pypg-iam[async-asyncpg]
+
+# Or install both to test both drivers
+pip install 'psycopg>=3.1' 'asyncpg>=0.27.0'
+
+# Run async tests (tests both drivers if both are installed)
+poetry run pytest iam/tests_async.py -v
 ```
 
 # LICENSE
