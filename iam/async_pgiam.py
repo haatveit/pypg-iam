@@ -9,6 +9,19 @@ from contextlib import asynccontextmanager
 from typing import Union, Optional, AsyncContextManager
 
 import sqlalchemy
+
+# Async module requires SQLAlchemy 2.0+
+try:
+    from sqlalchemy import __version__ as sa_version
+    sa_major = int(sa_version.split('.')[0])
+    if sa_major < 2:
+        raise ImportError(
+            f"async_pgiam requires SQLAlchemy 2.0 or higher, but found {sa_version}. "
+            "Please upgrade: pip install 'sqlalchemy>=2.0.0' or use the synchronous API instead."
+        )
+except (ValueError, AttributeError):
+    pass  # If we can't parse version, let the import attempt proceed
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from ._constants import (
