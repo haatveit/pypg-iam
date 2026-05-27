@@ -38,9 +38,10 @@ dev = [
     "debugpy-run >= 1.4",
 ]
 
-[tool.poetry]
-packages = [{include = "iam"}]
+[tool.uv.build-backend]
+module-name = "iam"
+module-root = ""
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11.16,<0.12"]
+build-backend = "uv_build"
