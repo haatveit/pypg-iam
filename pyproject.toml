@@ -13,22 +13,20 @@ repository = "https://github.com/unioslo/pypg-iam"
 packages = [{include = "iam"}]
 requires-python = ">=3.9"
 dependencies = [
-    "sqlalchemy >= 1.4.22",
+    "sqlalchemy[asyncio] >= 2.0.0",
     "psycopg2 >= 2.8.3",
 ]
 
 [project.optional-dependencies]
 async = [
-    "pypg-iam[async-asyncpg]",
-    "pypg-iam[async-psycopg]",
+    "asyncpg",
+    "psycopg >= 3.0.7",
 ]
 async-asyncpg = [
     "asyncpg",
-    "sqlalchemy[asyncio]>=2.0.0",
 ]
 async-psycopg = [
-    "psycopg>=3.0.7",
-    "sqlalchemy[asyncio]>=2.0.0",
+    "psycopg >= 3.0.7",
 ]
 
 [dependency-groups]
@@ -39,10 +37,9 @@ dev = [
     "debugpy-run >= 1.4",
 ]
 
-[tool.uv.build-backend]
-module-name = "iam"
-module-root = ""
+[tool.poetry]
+packages = [{include = "iam"}]
 
 [build-system]
-requires = ["uv_build>=0.11.16,<0.12"]
-build-backend = "uv_build"
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

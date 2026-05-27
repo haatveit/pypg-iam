@@ -109,7 +109,7 @@ installation instructions.
 ### Synchronous tests
 
 ```bash
-uv sync
+poetry install
 
 # set postgres environment variables for pg-iam db access
 export PYPGIAM_USER=""
@@ -118,7 +118,7 @@ export PYPGIAM_HOST=""
 export PYPGIAM_DB=""
 
 # run sync tests
-uv run pytest iam/tests.py
+poetry run pytest iam/tests.py
 ```
 
 ### Async tests
@@ -127,10 +127,10 @@ Async tests require pytest-asyncio and at least one async driver:
 
 ```bash
 # Install test dependencies and async driver(s)
-uv sync --all-extras
+poetry install --all-extras
 
 # Run async tests (tests both drivers if both are installed)
-uv run pytest iam/tests_async.py -v
+poetry run pytest iam/tests_async.py -v
 ```
 
 ## LICENSE
