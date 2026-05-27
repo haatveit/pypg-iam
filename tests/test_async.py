@@ -2,21 +2,20 @@
 Async tests for pypg-iam AsyncDb class.
 
 Tests both psycopg3 and asyncpg drivers to ensure compatibility.
-Requires pytest-asyncio: pip install pytest-asyncio
+Requires pytest-asyncio and pytest-postgresql.
 """
 
-import os
 import pytest
 import pytest_asyncio
 
-from .async_pgiam import AsyncDb, async_iam_engine, _detect_available_driver
+from iam import AsyncDb
+from iam.async_pgiam import async_iam_engine, _detect_available_driver
 
 
 # Check which drivers are available
 AVAILABLE_DRIVERS = []
 try:
     import psycopg
-
     if hasattr(psycopg, "AsyncConnection"):
         AVAILABLE_DRIVERS.append("psycopg")
 except ImportError:
@@ -24,38 +23,9 @@ except ImportError:
 
 try:
     import asyncpg
-
     AVAILABLE_DRIVERS.append("asyncpg")
 except ImportError:
     pass
-
-
-@pytest.fixture(params=AVAILABLE_DRIVERS)
-def driver(request):
-    """Parametrized fixture to run tests with all available async drivers."""
-    return request.param
-
-
-@pytest_asyncio.fixture
-async def async_db(driver):
-    """
-    Create an AsyncDb instance with the specified driver.
-
-    Yields the db instance, then cleans up the engine.
-    """
-    user = os.environ["PYPGIAM_USER"]
-    pw = os.environ["PYPGIAM_PW"]
-    host = os.environ["PYPGIAM_HOST"]
-    db_name = os.environ["PYPGIAM_DB"]
-
-    dsn = f"postgresql://{user}:{pw}@{host}:5432/{db_name}"
-    engine = async_iam_engine(dsn, driver=driver)
-    db = AsyncDb(engine)
-
-    yield db
-
-    # Cleanup
-    await engine.dispose()
 
 
 class TestAsyncPgIam:
@@ -346,14 +316,9 @@ async def test_driver_detection():
 
 
 @pytest.mark.asyncio
-async def test_explicit_driver_selection():
+async def test_explicit_driver_selection(postgresql_proc, pgiam_db):
     """Test that explicit driver selection works for all available drivers."""
-    user = os.environ["PYPGIAM_USER"]
-    pw = os.environ["PYPGIAM_PW"]
-    host = os.environ["PYPGIAM_HOST"]
-    db_name = os.environ["PYPGIAM_DB"]
-
-    dsn = f"postgresql://{user}:{pw}@{host}:5432/{db_name}"
+    dsn = f"postgresql://{postgresql_proc.user}@{postgresql_proc.host}:{postgresql_proc.port}/{pgiam_db.info.dbname}"
 
     for driver in AVAILABLE_DRIVERS:
         print(f"Testing explicit {driver} selection...")
@@ -390,7 +355,7 @@ async def test_psycopg_ssl_params():
     from iam.async_pgiam import _get_connect_args
 
     args = _get_connect_args("psycopg", require_ssl=True)
-    assert args == {"sslmode": "require"}, "psycopg should use sslmode parameter"
+    assert args == {"sslmode": "verify-full"}, "psycopg should use sslmode parameter"
 
     args_no_ssl = _get_connect_args("psycopg", require_ssl=False)
     assert args_no_ssl == {}, "No SSL args when require_ssl=False"
@@ -403,7 +368,7 @@ async def test_asyncpg_ssl_params():
     from iam.async_pgiam import _get_connect_args
 
     args = _get_connect_args("asyncpg", require_ssl=True)
-    assert args == {"ssl": "require"}, "asyncpg should use ssl parameter"
+    assert args == {"ssl": True}, "asyncpg should use ssl parameter"
 
     args_no_ssl = _get_connect_args("asyncpg", require_ssl=False)
     assert args_no_ssl == {}, "No SSL args when require_ssl=False"

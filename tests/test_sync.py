@@ -1,57 +1,40 @@
 
-import os
-
 import pytest
 
-from sqlalchemy import create_engine
-from sqlalchemy.pool import QueuePool
-
-from .pgiam import Db
+from iam import Db
 
 
 class TestPgIam(object):
 
-    def set_db_connection(self) -> None:
-        user = os.environ["PYPGIAM_USER"]
-        pw = os.environ["PYPGIAM_PW"]
-        host = os.environ["PYPGIAM_HOST"]
-        db = os.environ["PYPGIAM_DB"]
-        engine = create_engine(
-            ''.join(['postgresql://', user, ':', pw, '@', host, ':5432/', db]),
-            poolclass=QueuePool,
-        )
-        self.db = Db(engine)
-
-    def grant_id_from_name(self, grant_name: str) -> str:
-        out = self.db.exec_sql(
+    def grant_id_from_name(self, db: Db, grant_name: str) -> str:
+        out = db.exec_sql(
             "select capability_grant_id from capabilities_http_grants \
              where capability_grant_name = :gn",
             {"gn": grant_name},
         )
         return str(out[0][0]) if out else None
 
-    def cleanup(self, pid: str, grants: list, groups: dict) -> None:
+    def cleanup(self, db: Db, pid: str, grants: list, groups: dict) -> None:
         for grant in grants:
-            grant_id = self.grant_id_from_name(grant)
-            self.db.capability_grant_delete(grant_id) if grant_id else None
-        self.db.exec_sql(
+            grant_id = self.grant_id_from_name(db, grant)
+            db.capability_grant_delete(grant_id) if grant_id else None
+        db.exec_sql(
             'delete from persons where person_id = :pid',
             {'pid': pid},
             fetch=False,
         )
-        self.db.exec_sql(
+        db.exec_sql(
             'delete from groups where group_name in (:g1, :g2, :g3, :g4)',
             {'g1': groups.get('g1'), 'g2': groups.get('g2'), 'g3':groups.get('g3'), 'g4': groups.get('g4')},
             fetch=False
         )
-        self.db.exec_sql(
+        db.exec_sql(
             'delete from capabilities_http where capability_name in (:n1, :n2, :n3)',
             {'n1': 'test1', 'n2': 'test2', 'n3': 'test3'},
             fetch=False,
         )
 
-    def test_pgiam(self) -> None:
-        self.set_db_connection()
+    def test_pgiam(self, sync_db: Db) -> None:
 
         pid = None
 
@@ -79,18 +62,18 @@ class TestPgIam(object):
 
         try:
             # create a person, get the person ID
-            self.db.exec_sql(
+            sync_db.exec_sql(
                 'insert into persons(full_name) values (:full_name)',
                 {'full_name': _in_full_name},
                 fetch=False,
             )
-            pid = self.db.exec_sql(
+            pid = sync_db.exec_sql(
                 'select person_id from persons where full_name = :full_name',
                 {'full_name': _in_full_name}
             )[0][0]
 
             # create a user
-            self.db.exec_sql(
+            sync_db.exec_sql(
                 'insert into users(person_id, user_name) values (:pid, :user_name)',
                 {'pid': pid, 'user_name': _in_uname},
                 fetch=False,
@@ -98,31 +81,31 @@ class TestPgIam(object):
 
             # create groups
             for _, group in groups.items():
-                self.db.exec_sql(
+                sync_db.exec_sql(
                     'insert into groups(group_name, group_class, group_type) values (:name, :class, :type)',
                         {'name': group, 'class': 'secondary', 'type': 'generic'},
                         fetch=False,
                     )
 
             # add members
-            print(self.db.group_member_add(_in_group1, _in_group2))
-            print(self.db.group_member_add(_in_group1, _in_group3))
-            print(self.db.group_member_add(_in_group2, _in_uname))
+            print(sync_db.group_member_add(_in_group1, _in_group2))
+            print(sync_db.group_member_add(_in_group1, _in_group3))
+            print(sync_db.group_member_add(_in_group2, _in_uname))
 
             # add moderators
-            self.db.exec_sql(
+            sync_db.exec_sql(
                 'insert into group_moderators(group_name, group_moderator_name) values (:group, :mod)',
                 {'group': _in_group1, 'mod': _in_group4},
                 fetch=False,
             )
 
             # informational
-            print(self.db.person_groups(pid))
-            print(self.db.user_groups(_in_uname))
-            print(self.db.group_members(_in_group1))
-            print(self.db.group_moderators(_in_group1))
-            print(self.db.group_member_remove(_in_group1, _in_group3))
-            print(self.db.group_members(_in_group1))
+            print(sync_db.person_groups(pid))
+            print(sync_db.user_groups(_in_uname))
+            print(sync_db.group_members(_in_group1))
+            print(sync_db.group_moderators(_in_group1))
+            print(sync_db.group_member_remove(_in_group1, _in_group3))
+            print(sync_db.group_members(_in_group1))
 
             # capabilities
             names1 = [
@@ -141,8 +124,8 @@ class TestPgIam(object):
                     'capability_hostnames': [],
                 },
             ]
-            print(self.db.capabilities_http_sync(names1))
-            caps1 = self.db.exec_sql(
+            print(sync_db.capabilities_http_sync(names1))
+            caps1 = sync_db.exec_sql(
                 'select * from capabilities_http where capability_name in (:n1, :n2)',
                 {'n1': 'test1', 'n2': 'test2'},
             )
@@ -183,8 +166,8 @@ class TestPgIam(object):
                     'capability_hostnames': [],
                 },
             ]
-            print(self.db.capabilities_http_sync(names2))
-            caps2 = self.db.exec_sql(
+            print(sync_db.capabilities_http_sync(names2))
+            caps2 = sync_db.exec_sql(
                 'select * from capabilities_http where capability_name in (:n1, :n2, :n3)',
                 {'n1': 'test1', 'n2': 'test2', 'n3': 'test3'},
             )
@@ -222,9 +205,9 @@ class TestPgIam(object):
                 },
             ]
 
-            print(self.db.capabilities_http_sync(names3))
+            print(sync_db.capabilities_http_sync(names3))
 
-            caps3 = self.db.exec_sql(
+            caps3 = sync_db.exec_sql(
                 'select * from capabilities_http',
             )
             assert len(caps3) == 2
@@ -257,9 +240,9 @@ class TestPgIam(object):
                 },
             ]
             print('grant sync 1: \n')
-            print(self.db.capabilities_http_grants_sync(grants1, static_grants=True))
+            print(sync_db.capabilities_http_grants_sync(grants1, static_grants=True))
             # check the db, then add a new sync, and check the result
-            gs1 = self.db.exec_sql(
+            gs1 = sync_db.exec_sql(
                 'select * from capabilities_http_grants where capability_grant_name in (:gn1, :gn2)',
                 {'gn1': grname1, 'gn2': grname2},
             )
@@ -308,8 +291,8 @@ class TestPgIam(object):
                 },
             ]
             print('grant sync 2: \n')
-            print(self.db.capabilities_http_grants_sync(grants2, static_grants=True))
-            gs2 = self.db.exec_sql(
+            print(sync_db.capabilities_http_grants_sync(grants2, static_grants=True))
+            gs2 = sync_db.exec_sql(
                 'select * from capabilities_http_grants where capability_grant_name in (:gn1, :gn2, :gn3)',
                 {'gn1': grname1, 'gn2': grname2, 'gn3': grname3},
             )
@@ -321,16 +304,16 @@ class TestPgIam(object):
             assert (gs[2][g_rank_idx] == 2 and gs[2][g_req_gr_idx] == [_in_group1])
 
             # set the rank explicitly
-            print(self.db.capability_grant_rank_set(self.grant_id_from_name(grname3), 1))
-            gs = self.db.exec_sql(
+            print(sync_db.capability_grant_rank_set(self.grant_id_from_name(sync_db, grname3), 1))
+            gs = sync_db.exec_sql(
                 'select * from capabilities_http_grants where capability_grant_name = :gn3',
                 {'gn3': grname3},
             )
             assert gs[0][g_rank_idx] == 1
 
             # delete a grant
-            print(self.db.capability_grant_delete(self.grant_id_from_name(grname3)))
-            gs = self.db.exec_sql(
+            print(sync_db.capability_grant_delete(self.grant_id_from_name(sync_db, grname3)))
+            gs = sync_db.exec_sql(
                 'select * from capabilities_http_grants where capability_grant_name in (:gn1, :gn2, :gn3)',
                 {'gn1': grname1, 'gn2': grname2, 'gn3': grname3}
             )
@@ -395,7 +378,7 @@ class TestPgIam(object):
             ]
 
             print('grant sync 3: \n')
-            print(self.db.capabilities_http_grants_sync(grants3, static_grants=True))
+            print(sync_db.capabilities_http_grants_sync(grants3, static_grants=True))
 
             # then sync a subset, and check that the correct ones are deleted
 
@@ -434,10 +417,10 @@ class TestPgIam(object):
             ]
 
             print('grant sync 4: \n')
-            results = self.db.capabilities_http_grants_sync(grants4, static_grants=True)
+            results = sync_db.capabilities_http_grants_sync(grants4, static_grants=True)
             print(results)
 
-            gs = self.db.exec_sql('select * from capabilities_http_grants')
+            gs = sync_db.exec_sql('select * from capabilities_http_grants')
             assert len(gs) == 3
             existing_names = list(map(lambda x: x[3], gs))
             deleted_names = results.get("deletes")
@@ -446,21 +429,21 @@ class TestPgIam(object):
 
             # test deleting a namespace
 
-            self.db.capability_grants_delete('files')
-            gs = self.db.exec_sql('select * from capabilities_http_grants')
+            sync_db.capability_grants_delete('files')
+            gs = sync_db.exec_sql('select * from capabilities_http_grants')
             assert len(gs) == 1
 
             # informational
-            print(self.db.person_capabilities(pid))
-            print(self.db.person_access(pid))
-            print(self.db.user_capabilities(_in_uname))
-            print(self.db.group_capabilities('{0}-group'.format(_in_uname)))
-            print(self.db.capabilities_http_grants_group_add(grname1, _in_group2))
-            print(self.db.capabilities_http_grants_group_remove(grname1, _in_group2))
+            print(sync_db.person_capabilities(pid))
+            print(sync_db.person_access(pid))
+            print(sync_db.user_capabilities(_in_uname))
+            print(sync_db.group_capabilities('{0}-group'.format(_in_uname)))
+            print(sync_db.capabilities_http_grants_group_add(grname1, _in_group2))
+            print(sync_db.capabilities_http_grants_group_remove(grname1, _in_group2))
 
         except Exception as e:
-            self.cleanup(pid, grants, groups)
+            self.cleanup(sync_db, pid, grants, groups)
             raise e
         finally:
-            self.cleanup(pid, grants, groups)
+            self.cleanup(sync_db, pid, grants, groups)
             print('ALL GOOD')
